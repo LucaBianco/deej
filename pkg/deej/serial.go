@@ -150,20 +150,33 @@ func readLoop(sio *SerialIO, namedLogger *zap.SugaredLogger) {
 
 // Write color config data every 5 seconds
 func writeLoop(sio *SerialIO, namedLogger *zap.SugaredLogger) {
+	changesChannel := sio.deej.config.SubscribeToChanges()
 	connWriter := bufio.NewWriter(sio.conn)
 	sio.logger.Debug("Starting write loop.")
 
 	for {
-		//Exit if stop message is raised
+		configChanges := false
+
+		//Wait 500 ms
+		time.Sleep(500 * time.Millisecond)
+
 		select {
-		case <-sio.stopChannel:
+		case <-sio.stopChannel: // Exit if stop message is raised
 			sio.logger.Debug("Closing writer")
 			sio.close(namedLogger)
+		case <-changesChannel: // Get notified of config changes
+			configChanges = true
 		default:
 		}
+
 		if sio.connected == false {
 			sio.logger.Debug("Stopping write loop.")
 			return
+		}
+
+		// Send the rgb data only if config has changed
+		if configChanges == false {
+			continue
 		}
 
 		//Create message
@@ -195,9 +208,6 @@ func writeLoop(sio *SerialIO, namedLogger *zap.SugaredLogger) {
 			sio.close(namedLogger)
 			continue
 		}
-
-		//Wait 5 seconds
-		time.Sleep(500 * time.Millisecond)
 	}
 }
 
