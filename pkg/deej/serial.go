@@ -109,22 +109,96 @@ func (sio *SerialIO) Start() error {
 	namedLogger.Infow("Connected", "conn", sio.conn)
 	sio.connected = true
 
-	// read lines or await a stop
-	go func() {
-		connReader := bufio.NewReader(sio.conn)
-		lineChannel := sio.readLine(namedLogger, connReader)
-
-		for {
-			select {
-			case <-sio.stopChannel:
-				sio.close(namedLogger)
-			case line := <-lineChannel:
-				sio.handleLine(namedLogger, line)
-			}
-		}
-	}()
+	go readLoop(sio, namedLogger)
+	go writeLoop(sio, namedLogger)
 
 	return nil
+}
+
+// Read from physical device
+func readLoop(sio *SerialIO, namedLogger *zap.SugaredLogger) {
+	connReader := bufio.NewReader(sio.conn)
+	sio.logger.Debug("Starting read loop.")
+
+	for {
+		//Exit if stop message is raised
+		select {
+		case <-sio.stopChannel:
+			sio.logger.Debug("Closing reader")
+			sio.close(namedLogger)
+		default:
+		}
+		if sio.connected == false {
+			sio.logger.Debug("Stopping read loop.")
+			return
+		}
+
+		//Read line
+		line, err := connReader.ReadString('\n')
+
+		if err != nil {
+			sio.close(namedLogger)
+			continue
+		}
+
+		if sio.deej.Verbose() {
+			sio.logger.Debug("deej <-" + line)
+		}
+		sio.handleLine(namedLogger, line)
+	}
+}
+
+// Write color config data every 5 seconds
+func writeLoop(sio *SerialIO, namedLogger *zap.SugaredLogger) {
+	connWriter := bufio.NewWriter(sio.conn)
+	sio.logger.Debug("Starting write loop.")
+
+	for {
+		//Exit if stop message is raised
+		select {
+		case <-sio.stopChannel:
+			sio.logger.Debug("Closing writer")
+			sio.close(namedLogger)
+		default:
+		}
+		if sio.connected == false {
+			sio.logger.Debug("Stopping write loop.")
+			return
+		}
+
+		//Create message
+		message := ""
+
+		if sio.deej.Verbose() {
+			sio.logger.Debug("Creating Message")
+		}
+
+		for i := 0; i < len(sio.deej.config.LedColors); i++ {
+			color := (int)(sio.deej.config.LedColors[i])
+
+			if i != 0 {
+				message += "|"
+			}
+			message += strconv.Itoa(color)
+		}
+		message += "\n"
+
+		//Write line
+		if sio.deej.Verbose() {
+			sio.logger.Debug("deej -> " + message)
+		}
+		_, err := connWriter.WriteString(message)
+		connWriter.Flush()
+
+		if err != nil {
+			sio.logger.Debug("ERROR! Stopping.")
+			sio.close(namedLogger)
+			continue
+		}
+
+		//Wait 5 seconds
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // Stop signals us to shut down our serial connection, if one is active

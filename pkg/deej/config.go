@@ -18,6 +18,8 @@ import (
 type CanonicalConfig struct {
 	SliderMapping *sliderMap
 
+	LedColors []int
+
 	ConnectionInfo struct {
 		COMPort  string
 		BaudRate int
@@ -49,13 +51,14 @@ const (
 	configType = "yaml"
 
 	configKeySliderMapping       = "slider_mapping"
+	configKeyLedColors           = "led_colors"
 	configKeyInvertSliders       = "invert_sliders"
 	configKeyCOMPort             = "com_port"
 	configKeyBaudRate            = "baud_rate"
 	configKeyNoiseReductionLevel = "noise_reduction"
 
-	defaultCOMPort  = "COM4"
-	defaultBaudRate = 9600
+	defaultCOMPort  = "COM5"
+	defaultBaudRate = 115200
 )
 
 // has to be defined as a non-constant because we're using path.Join
@@ -222,6 +225,8 @@ func (cc *CanonicalConfig) populateFromVipers() error {
 		cc.userConfig.GetStringMapStringSlice(configKeySliderMapping),
 		cc.internalConfig.GetStringMapStringSlice(configKeySliderMapping),
 	)
+
+	cc.LedColors = cc.userConfig.GetIntSlice(configKeyLedColors)
 
 	// get the rest of the config fields - viper saves us a lot of effort here
 	cc.ConnectionInfo.COMPort = cc.userConfig.GetString(configKeyCOMPort)
