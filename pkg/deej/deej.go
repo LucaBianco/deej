@@ -1,208 +1,270 @@
-// Package deej provides a machine-side client that pairs with an Arduino
-// chip to form a tactile, physical volume control system/
 package deej
 
 import (
-	"errors"
 	"fmt"
-	"os"
+	"path"
+	"strings"
+	"time"
 
+	"github.com/fsnotify/fsnotify"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/omriharel/deej/pkg/deej/util"
 )
 
-const (
+// CanonicalConfig provides application-wide access to configuration fields,
+// as well as loading/file watching logic for deej's configuration file
+type CanonicalConfig struct {
+	SliderMapping *sliderMap
+	
+	LedBrightnessDivider int
+	LedFixedBrightness bool
+	LedColors []int
 
-	// when this is set to anything, deej won't use a tray icon
-	envNoTray = "DEEJ_NO_TRAY_ICON"
+	ConnectionInfo struct {
+		COMPort  string
+		BaudRate int
+	}
+
+	InvertSliders bool
+
+	NoiseReductionLevel string
+
+	logger             *zap.SugaredLogger
+	notifier           Notifier
+	stopWatcherChannel chan bool
+
+	reloadConsumers []chan bool
+
+	userConfig     *viper.Viper
+	internalConfig *viper.Viper
+}
+
+const (
+	userConfigFilepath     = "config.yaml"
+	internalConfigFilepath = "preferences.yaml"
+
+	userConfigName     = "config"
+	internalConfigName = "preferences"
+
+	userConfigPath = "."
+
+	configType = "yaml"
+
+	configKeySliderMapping       = "slider_mapping"
+
+	configKeyLedBrightnessDivider= "led_brightness_divider"
+	configKeyLedFixedBrightness  = "led_fixed_brightness"
+	configKeyLedColors           = "led_colors"
+	configKeyInvertSliders       = "invert_sliders"
+	configKeyCOMPort             = "com_port"
+	configKeyBaudRate            = "baud_rate"
+	configKeyNoiseReductionLevel = "noise_reduction"
+
+	defaultCOMPort  = "COM5"
+	defaultBaudRate = 115200
 )
 
-// Deej is the main entity managing access to all sub-components
-type Deej struct {
-	logger   *zap.SugaredLogger
-	notifier Notifier
-	config   *CanonicalConfig
-	serial   *SerialIO
-	sessions *sessionMap
+// has to be defined as a non-constant because we're using path.Join
+var internalConfigPath = path.Join(".", logDirectory)
 
-	stopChannel chan bool
-	version     string
-	verbose     bool
+var defaultSliderMapping = func() *sliderMap {
+	emptyMap := newSliderMap()
+	emptyMap.set(0, []string{masterSessionName})
+
+	return emptyMap
+}()
+
+// NewConfig creates a config instance for the deej object and sets up viper instances for deej's config files
+func NewConfig(logger *zap.SugaredLogger, notifier Notifier) (*CanonicalConfig, error) {
+	logger = logger.Named("config")
+
+	cc := &CanonicalConfig{
+		logger:             logger,
+		notifier:           notifier,
+		reloadConsumers:    []chan bool{},
+		stopWatcherChannel: make(chan bool),
+	}
+
+	// distinguish between the user-provided config (config.yaml) and the internal config (logs/preferences.yaml)
+	userConfig := viper.New()
+	userConfig.SetConfigName(userConfigName)
+	userConfig.SetConfigType(configType)
+	userConfig.AddConfigPath(userConfigPath)
+
+	userConfig.SetDefault(configKeySliderMapping, map[string][]string{})
+
+	userConfig.SetDefault(configKeyLedColors, int[]{})
+	userConfig.SetDefault(configKeyLedBrightnessDivider, 4)
+	userConfig.SetDefault(configKeyLedFixedBrightness, false)
+
+	userConfig.SetDefault(configKeyInvertSliders, false)
+	userConfig.SetDefault(configKeyCOMPort, defaultCOMPort)
+	userConfig.SetDefault(configKeyBaudRate, defaultBaudRate)
+
+	internalConfig := viper.New()
+	internalConfig.SetConfigName(internalConfigName)
+	internalConfig.SetConfigType(configType)
+	internalConfig.AddConfigPath(internalConfigPath)
+
+	cc.userConfig = userConfig
+	cc.internalConfig = internalConfig
+
+	logger.Debug("Created config instance")
+
+	return cc, nil
 }
 
-// NewDeej creates a Deej instance
-func NewDeej(logger *zap.SugaredLogger, verbose bool) (*Deej, error) {
-	logger = logger.Named("deej")
+// Load reads deej's config files from disk and tries to parse them
+func (cc *CanonicalConfig) Load() error {
+	cc.logger.Debugw("Loading config", "path", userConfigFilepath)
 
-	notifier, err := NewToastNotifier(logger)
-	if err != nil {
-		logger.Errorw("Failed to create ToastNotifier", "error", err)
-		return nil, fmt.Errorf("create new ToastNotifier: %w", err)
+	// make sure it exists
+	if !util.FileExists(userConfigFilepath) {
+		cc.logger.Warnw("Config file not found", "path", userConfigFilepath)
+		cc.notifier.Notify("Can't find configuration!",
+			fmt.Sprintf("%s must be in the same directory as deej. Please re-launch", userConfigFilepath))
+
+		return fmt.Errorf("config file doesn't exist: %s", userConfigFilepath)
 	}
 
-	config, err := NewConfig(logger, notifier)
-	if err != nil {
-		logger.Errorw("Failed to create Config", "error", err)
-		return nil, fmt.Errorf("create new Config: %w", err)
+	// load the user config
+	if err := cc.userConfig.ReadInConfig(); err != nil {
+		cc.logger.Warnw("Viper failed to read user config", "error", err)
+
+		// if the error is yaml-format-related, show a sensible error. otherwise, show 'em to the logs
+		if strings.Contains(err.Error(), "yaml:") {
+			cc.notifier.Notify("Invalid configuration!",
+				fmt.Sprintf("Please make sure %s is in a valid YAML format.", userConfigFilepath))
+		} else {
+			cc.notifier.Notify("Error loading configuration!", "Please check deej's logs for more details.")
+		}
+
+		return fmt.Errorf("read user config: %w", err)
 	}
 
-	d := &Deej{
-		logger:      logger,
-		notifier:    notifier,
-		config:      config,
-		stopChannel: make(chan bool),
-		verbose:     verbose,
+	// load the internal config - this doesn't have to exist, so it can error
+	if err := cc.internalConfig.ReadInConfig(); err != nil {
+		cc.logger.Debugw("Viper failed to read internal config", "error", err, "reminder", "this is fine")
 	}
 
-	serial, err := NewSerialIO(d, logger)
-	if err != nil {
-		logger.Errorw("Failed to create SerialIO", "error", err)
-		return nil, fmt.Errorf("create new SerialIO: %w", err)
+	// canonize the configuration with viper's helpers
+	if err := cc.populateFromVipers(); err != nil {
+		cc.logger.Warnw("Failed to populate config fields", "error", err)
+		return fmt.Errorf("populate config fields: %w", err)
 	}
 
-	d.serial = serial
-
-	sessionFinder, err := newSessionFinder(logger)
-	if err != nil {
-		logger.Errorw("Failed to create SessionFinder", "error", err)
-		return nil, fmt.Errorf("create new SessionFinder: %w", err)
-	}
-
-	sessions, err := newSessionMap(d, logger, sessionFinder)
-	if err != nil {
-		logger.Errorw("Failed to create sessionMap", "error", err)
-		return nil, fmt.Errorf("create new sessionMap: %w", err)
-	}
-
-	d.sessions = sessions
-
-	logger.Debug("Created deej instance")
-
-	return d, nil
-}
-
-// Initialize sets up components and starts to run in the background
-func (d *Deej) Initialize() error {
-	d.logger.Debug("Initializing")
-
-	// load the config for the first time
-	if err := d.config.Load(); err != nil {
-		d.logger.Errorw("Failed to load config during initialization", "error", err)
-		return fmt.Errorf("load config during init: %w", err)
-	}
-
-	// initialize the session map
-	if err := d.sessions.initialize(); err != nil {
-		d.logger.Errorw("Failed to initialize session map", "error", err)
-		return fmt.Errorf("init session map: %w", err)
-	}
-
-	// decide whether to run with/without tray
-	if _, noTraySet := os.LookupEnv(envNoTray); noTraySet {
-
-		d.logger.Debugw("Running without tray icon", "reason", "envvar set")
-
-		// run in main thread while waiting on ctrl+C
-		d.setupInterruptHandler()
-		d.run()
-
-	} else {
-		d.setupInterruptHandler()
-		d.initializeTray(d.run)
-	}
+	cc.logger.Info("Loaded config successfully")
+	cc.logger.Infow("Config values",
+		"sliderMapping", cc.SliderMapping,
+		"connectionInfo", cc.ConnectionInfo,
+		"invertSliders", cc.InvertSliders)
 
 	return nil
 }
 
-// SetVersion causes deej to add a version string to its tray menu if called before Initialize
-func (d *Deej) SetVersion(version string) {
-	d.version = version
+// SubscribeToChanges allows external components to receive updates when the config is reloaded
+func (cc *CanonicalConfig) SubscribeToChanges() chan bool {
+	c := make(chan bool)
+	cc.reloadConsumers = append(cc.reloadConsumers, c)
+
+	return c
 }
 
-// Verbose returns a boolean indicating whether deej is running in verbose mode
-func (d *Deej) Verbose() bool {
-	return d.verbose
-}
+// WatchConfigFileChanges starts watching for configuration file changes
+// and attempts reloading the config when they happen
+func (cc *CanonicalConfig) WatchConfigFileChanges() {
+	cc.logger.Debugw("Starting to watch user config file for changes", "path", userConfigFilepath)
 
-func (d *Deej) setupInterruptHandler() {
-	interruptChannel := util.SetupCloseHandler()
+	const (
+		minTimeBetweenReloadAttempts = time.Millisecond * 500
+		delayBetweenEventAndReload   = time.Millisecond * 50
+	)
 
-	go func() {
-		signal := <-interruptChannel
-		d.logger.Debugw("Interrupted", "signal", signal)
-		d.signalStop()
-	}()
-}
+	lastAttemptedReload := time.Now()
 
-func (d *Deej) run() {
-	d.logger.Info("Run loop starting")
+	// establish watch using viper as opposed to doing it ourselves, though our internal cooldown is still required
+	cc.userConfig.WatchConfig()
+	cc.userConfig.OnConfigChange(func(event fsnotify.Event) {
 
-	// watch the config file for changes
-	go d.config.WatchConfigFileChanges()
+		// when we get a write event...
+		if event.Op&fsnotify.Write == fsnotify.Write {
 
-	// connect to the arduino for the first time
-	go func() {
-		if err := d.serial.Start(); err != nil {
-			d.logger.Warnw("Failed to start first-time serial connection", "error", err)
+			now := time.Now()
 
-			// If the port is busy, that's because something else is connected - notify and quit
-			if errors.Is(err, os.ErrPermission) {
-				d.logger.Warnw("Serial port seems busy, notifying user and closing",
-					"comPort", d.config.ConnectionInfo.COMPort)
+			// ... check if it's not a duplicate (many editors will write to a file twice)
+			if lastAttemptedReload.Add(minTimeBetweenReloadAttempts).Before(now) {
 
-				d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
-					"This serial port is busy, make sure to close any serial monitor or other deej instance.")
+				// and attempt reload if appropriate
+				cc.logger.Debugw("Config file modified, attempting reload", "event", event)
 
-				d.signalStop()
+				// wait a bit to let the editor actually flush the new file contents to disk
+				<-time.After(delayBetweenEventAndReload)
 
-				// also notify if the COM port they gave isn't found, maybe their config is wrong
-			} else if errors.Is(err, os.ErrNotExist) {
-				d.logger.Warnw("Provided COM port seems wrong, notifying user and closing",
-					"comPort", d.config.ConnectionInfo.COMPort)
+				if err := cc.Load(); err != nil {
+					cc.logger.Warnw("Failed to reload config file", "error", err)
+				} else {
+					cc.logger.Info("Reloaded config successfully")
+					cc.notifier.Notify("Configuration reloaded!", "Your changes have been applied.")
 
-				d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
-					"This serial port doesn't exist, check your configuration and make sure it's set correctly.")
+					cc.onConfigReloaded()
+				}
 
-				d.signalStop()
+				// don't forget to update the time
+				lastAttemptedReload = now
 			}
 		}
-	}()
+	})
 
-	// wait until stopped (gracefully)
-	<-d.stopChannel
-	d.logger.Debug("Stop channel signaled, terminating")
-
-	if err := d.stop(); err != nil {
-		d.logger.Warnw("Failed to stop deej", "error", err)
-		os.Exit(1)
-	} else {
-		// exit with 0
-		os.Exit(0)
-	}
+	// wait till they stop us
+	<-cc.stopWatcherChannel
+	cc.logger.Debug("Stopping user config file watcher")
+	cc.userConfig.OnConfigChange(nil)
 }
 
-func (d *Deej) signalStop() {
-	d.logger.Debug("Signalling stop channel")
-	d.stopChannel <- true
+// StopWatchingConfigFile signals our filesystem watcher to stop
+func (cc *CanonicalConfig) StopWatchingConfigFile() {
+	cc.stopWatcherChannel <- true
 }
 
-func (d *Deej) stop() error {
-	d.logger.Info("Stopping")
+func (cc *CanonicalConfig) populateFromVipers() error {
 
-	d.config.StopWatchingConfigFile()
-	d.serial.Stop()
+	// merge the slider mappings from the user and internal configs
+	cc.SliderMapping = sliderMapFromConfigs(
+		cc.userConfig.GetStringMapStringSlice(configKeySliderMapping),
+		cc.internalConfig.GetStringMapStringSlice(configKeySliderMapping),
+	)
 
-	// release the session map
-	if err := d.sessions.release(); err != nil {
-		d.logger.Errorw("Failed to release session map", "error", err)
-		return fmt.Errorf("release session map: %w", err)
+	cc.LedBrightnessDivider = cc.userConfig.GetInt(configKeyLedBrightnessDivider)
+	cc.LedFixedBrightness = cc.userConfig.GetBool(configKeyLedFixedBrightness)
+	cc.LedColors = cc.userConfig.GetIntSlice(configKeyLedColors)
+
+	// get the rest of the config fields - viper saves us a lot of effort here
+	cc.ConnectionInfo.COMPort = cc.userConfig.GetString(configKeyCOMPort)
+
+	cc.ConnectionInfo.BaudRate = cc.userConfig.GetInt(configKeyBaudRate)
+	if cc.ConnectionInfo.BaudRate <= 0 {
+		cc.logger.Warnw("Invalid baud rate specified, using default value",
+			"key", configKeyBaudRate,
+			"invalidValue", cc.ConnectionInfo.BaudRate,
+			"defaultValue", defaultBaudRate)
+
+		cc.ConnectionInfo.BaudRate = defaultBaudRate
 	}
 
-	d.stopTray()
+	cc.InvertSliders = cc.userConfig.GetBool(configKeyInvertSliders)
+	cc.NoiseReductionLevel = cc.userConfig.GetString(configKeyNoiseReductionLevel)
 
-	// attempt to sync on exit - this won't necessarily work but can't harm
-	d.logger.Sync()
+	cc.logger.Debug("Populated config fields from vipers")
 
 	return nil
+}
+
+func (cc *CanonicalConfig) onConfigReloaded() {
+	cc.logger.Debug("Notifying consumers about configuration reload")
+
+	for _, consumer := range cc.reloadConsumers {
+		consumer <- true
+	}
 }

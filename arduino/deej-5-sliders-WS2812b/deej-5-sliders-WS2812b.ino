@@ -7,6 +7,7 @@
 int pins[NUM_CH] = {A0, A1, A2, A3, A4 /*, please add if more needed*/};   // Analog pins for each channel
 uint32_t baseColors[NUM_CH] = {0xFF00FF, 0x00FFFF, 0x00FF00, 0xFFFF00, 0xFF3F00 /*, please add if more needed*/};   // Channel base colors
 uint8_t brightnessDivider = 4;  // 1 = full brightness
+bool fixedBrightness = false; // if true, does not set brightness = slider value for the channel but leaves it at max.
 uint8_t adcBits = 10;           // Normal arduino adc = 10 bits, some boards are 12 bits
 
 // Internal variables
@@ -41,7 +42,13 @@ void loop()
   {
     inboundMessage = Serial.readString();
     
-    for (uint8_t i=0; i < NUM_CH; i++)
+    String optionsString = split(inboundMessage, '|', 0);
+    optionsString.trim();
+    uint32_t options = optionsString.toInt();
+    fixedBrightness = options & 0xFF;
+    brightnessDivider = (options >> 8) & 0xFF;
+    
+    for (uint8_t i=1; i < NUM_CH + 1; i++)
     {
       String colorString = split(inboundMessage, '|', i);
       colorString.trim();
