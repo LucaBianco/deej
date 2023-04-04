@@ -72,9 +72,11 @@ void loop()
     // Set final RGB values
     uint16_t adcRange = (1 << adcBits);
 
-    leds[i].r = ((color & 0xFF0000) >> 16) * value / adcRange / brightnessDivider;
-    leds[i].g = ((color & 0x00FF00) >> 8 ) * value / adcRange / brightnessDivider;
-    leds[i].b =  (color & 0x0000FF)        * value / adcRange / brightnessDivider;
+    uint16_t displayedValue = fixedBrightness ? adcRange : value;
+
+    leds[i].r = ((color & 0xFF0000) >> 16) * displayedValue / adcRange / brightnessDivider;
+    leds[i].g = ((color & 0x00FF00) >> 8 ) * displayedValue / adcRange / brightnessDivider;
+    leds[i].b =  (color & 0x0000FF)        * displayedValue / adcRange / brightnessDivider;
   }
 
   FastLED.show();
