@@ -21,10 +21,6 @@ To use led colors, add them in a list. The length of the list must be equal to t
 Colors are in RGB Hex format: 0xFF0000 is red, 0x00FF00 is green and 0x0000FF is blue. All combinations are allowed and decoded by the arduino firmware.
 You can use any [color picker website](https://imagecolorpicker.com/) to get the color you want, just remember to write it with the 0xRRGGBB format and **not** the html one, #RRGGBB.
 
-Led Brightness Divider: 1 = full brightness, 4 = default; Max brightness = 255 / value;
-
-Led Fixed Brightness: false is default and means that the brightness of each led will be determined by the value of its corresponding slider. true means the brightness will be fixed and equal to the maximum brightness allowed by the divider option.
-
 A possible config.yaml file might look like this:
 
 ```yaml
@@ -37,8 +33,6 @@ slider_mapping:
     - rocketleague.exe
   4: discord.exe
 
-led_brightness_divider: 4 
-led_fixed_brightness: false
 led_colors:
   - 0xFF00FF # Magenta
   - 0x00FFFF # Aqua

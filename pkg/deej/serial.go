@@ -186,11 +186,6 @@ func writeLoop(sio *SerialIO, namedLogger *zap.SugaredLogger) {
 			sio.logger.Debug("Creating Message")
 		}
 
-		// Add options
-		options := (sio.deej.config.LedBrightnessDivider & 0xFF) << 8 | (sio.deej.Config.LedFixedBrightness ? 1 : 0)
-		message += strconv.Itoa(options) + "|";
-
-		// Add led colors
 		for i := 0; i < len(sio.deej.config.LedColors); i++ {
 			color := (int)(sio.deej.config.LedColors[i])
 

@@ -19,8 +19,6 @@ slider_mapping:
     - rocketleague.exe
   4: Discord.exe
 
-led_brightness_divider: 4 
-led_fixed_brightness: false
 led_colors:
   - 0xFF00FF
   - 0x00FFFF
